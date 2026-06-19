@@ -7,5 +7,7 @@ services:
     dockerContext: ./browser-service
     envVars:
       - key: BROWSER_SERVICE_TOKEN
-        sync: false # bắt buộc nhập tay trong dashboard, không lưu trong repo
+        sync: false
+      - key: WSJ_COOKIES_JSON
+        sync: false
     healthCheckPath: /health
