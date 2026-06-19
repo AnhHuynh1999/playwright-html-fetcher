@@ -1,0 +1,15 @@
+{
+  "name": "browser-service",
+  "version": "1.0.0",
+  "description": "Headless browser HTTP service for fetching JS-rendered pages (e.g. via stealth Playwright)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "playwright": "^1.45.0",
+    "express": "^4.19.2"
+  }
+}
