@@ -1,11 +1,12 @@
 services:
   - type: web
-    name: browser-service
+    name: playwright-html-fetcher
     runtime: docker
     plan: free
-    dockerfilePath: ./browser-service/Dockerfile
-    dockerContext: ./browser-service
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: BROWSER_SERVICE_TOKEN
         sync: false # bắt buộc nhập tay trong dashboard, không lưu trong repo
     healthCheckPath: /health
+
