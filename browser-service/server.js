@@ -25,6 +25,23 @@ app.use(express.json());
 const PORT = process.env.PORT || 4000;
 // Token đơn giản để n8n xác thực khi gọi vào service này (đặt qua biến môi trường)
 const AUTH_TOKEN = process.env.BROWSER_SERVICE_TOKEN || "change-me";
+// Cookie JSON từ Render / môi trường để dùng cho WSJ hoặc trang cần session
+const WSJ_COOKIES_JSON = process.env.WSJ_COOKIES_JSON || "";
+
+function parseCookiesJson(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") return [parsed];
+    console.warn("WSJ_COOKIES_JSON phải là JSON array hoặc object cookie");
+  } catch (err) {
+    console.warn("Không parse được WSJ_COOKIES_JSON:", err.message);
+  }
+  return [];
+}
+
+const wsjCookies = parseCookiesJson(WSJ_COOKIES_JSON);
 
 let browserInstance = null;
 
@@ -80,6 +97,14 @@ app.post("/fetch-html", async (req, res) => {
 
     const page = await context.newPage();
 
+    if (wsjCookies.length > 0) {
+      try {
+        await context.addCookies(wsjCookies);
+      } catch (err) {
+        console.warn("Không thêm được WSJ_COOKIES_JSON vào context:", err.message);
+      }
+    }
+
     const response = await page.goto(url, {
       waitUntil: "networkidle",
       timeout: timeoutMs,
@@ -97,10 +122,11 @@ app.post("/fetch-html", async (req, res) => {
     const html = await page.content();
     const status = response ? response.status() : null;
     const finalUrl = page.url();
+    const cookies = await context.cookies();
 
     await context.close();
 
-    return res.json({ html, status, finalUrl });
+    return res.json({ html, status, finalUrl, cookies });
   } catch (err) {
     if (context) {
       try {
