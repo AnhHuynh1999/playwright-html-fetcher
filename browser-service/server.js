@@ -28,13 +28,41 @@ const AUTH_TOKEN = process.env.BROWSER_SERVICE_TOKEN || "change-me";
 // Cookie JSON từ Render / môi trường để dùng cho WSJ hoặc trang cần session
 const WSJ_COOKIES_JSON = process.env.WSJ_COOKIES_JSON || "";
 
+const SAMESITE_MAP = {
+  no_restriction: "None",
+  lax: "Lax",
+  strict: "Strict",
+  none: "None",
+};
+
+function normalizeSameSite(value) {
+  if (!value) return "Lax";
+  const normalized = SAMESITE_MAP[value.toLowerCase()];
+  return normalized || "Lax";
+}
+
+function normalizeCookies(cookies) {
+  return cookies.map((c) => {
+    const valid = ["Strict", "Lax", "None"];
+    const sameSite = valid.includes(c.sameSite)
+      ? c.sameSite
+      : normalizeSameSite(c.sameSite);
+    return { ...c, sameSite };
+  });
+}
+
 function parseCookiesJson(value) {
   if (!value) return [];
   try {
     const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && typeof parsed === "object") return [parsed];
-    console.warn("WSJ_COOKIES_JSON phải là JSON array hoặc object cookie");
+    let cookies;
+    if (Array.isArray(parsed)) cookies = parsed;
+    else if (parsed && typeof parsed === "object") cookies = [parsed];
+    else {
+      console.warn("WSJ_COOKIES_JSON phải là JSON array hoặc object cookie");
+      return [];
+    }
+    return normalizeCookies(cookies);
   } catch (err) {
     console.warn("Không parse được WSJ_COOKIES_JSON:", err.message);
   }
@@ -88,55 +116,112 @@ app.post("/fetch-html", async (req, res) => {
   try {
     const browser = await getBrowser();
 
+    // Attempt 1: Với WSJ_COOKIES_JSON (nếu có)
+    console.log(`[Attempt 1] Fetching: ${url}`);
+    const html1 = await fetchPageWithContext(browser, url, wsjCookies, waitForSelector, timeoutMs);
+    
+    if (html1.status === 401 && html1.html.includes("datadome")) {
+      console.log(`[Attempt 1] Got DataDome challenge (401). Extracting datadome cookie...`);
+      
+      // Parse datadome cookie từ HTML response
+      const datadomeMatch = html1.html.match(/'cookie':'([^']+)'/);
+      if (datadomeMatch && datadomeMatch[1]) {
+        const datadomeValue = datadomeMatch[1];
+        console.log(`[Attempt 2] Retrying with datadome cookie: ${datadomeValue.substring(0, 30)}...`);
+        
+        // Attempt 2: Với datadome cookie mới
+        const datadomeOnlyCookie = [{
+          name: "datadome",
+          value: datadomeValue,
+          domain: ".wsj.com",
+          path: "/",
+          httpOnly: false,
+          secure: false,
+          sameSite: "Lax"
+        }];
+        
+        // Combine WSJ cookies + datadome
+        const combinedCookies = [...wsjCookies, ...datadomeOnlyCookie];
+        const html2 = await fetchPageWithContext(browser, url, combinedCookies, waitForSelector, timeoutMs);
+        
+        if (html2.status !== 401 || !html2.html.includes("datadome")) {
+          return res.json(html2);
+        }
+      }
+    }
+    
+    return res.json(html1);
+  } catch (err) {
+    console.error("fetch-html error:", err.message || err);
+    return res.status(500).json({ error: err.message || "Unknown error" });
+  }
+});
+
+async function fetchPageWithContext(browser, url, cookies, waitForSelector, timeoutMs) {
+  let context;
+  try {
     context = await browser.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       viewport: { width: 1366, height: 768 },
       locale: "en-US",
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.wsj.com/",
+        "DNT": "1",
+      },
     });
 
     const page = await context.newPage();
 
-    if (wsjCookies.length > 0) {
+    if (cookies && cookies.length > 0) {
       try {
-        await context.addCookies(wsjCookies);
+        await context.addCookies(normalizeCookies(cookies));
+        console.log(`Added ${cookies.length} cookies`);
       } catch (err) {
-        console.warn("Không thêm được WSJ_COOKIES_JSON vào context:", err.message);
+        console.warn("Không thêm được cookies vào context:", err.message);
       }
     }
 
+    // Thêm delay nhỏ trước navigate để giả lập user thực
+    await page.waitForTimeout(500);
+
     const response = await page.goto(url, {
-      waitUntil: "networkidle",
+      waitUntil: "domcontentloaded",
       timeout: timeoutMs,
     });
 
+    const status = response ? response.status() : null;
+    console.log(`Response status: ${status}`);
+
+    // Chờ thêm vì DataDome iframe có thể cần thời gian để load
+    await page.waitForTimeout(1000);
+
     if (waitForSelector) {
       try {
-        await page.waitForSelector(waitForSelector, { timeout: timeoutMs });
+        await page.waitForSelector(waitForSelector, { timeout: Math.min(5000, timeoutMs) });
       } catch (e) {
-        // Không tìm thấy selector — vẫn tiếp tục trả về HTML hiện có để debug
         console.warn(`waitForSelector timeout: ${waitForSelector}`);
       }
     }
 
     const html = await page.content();
-    const status = response ? response.status() : null;
     const finalUrl = page.url();
-    const cookies = await context.cookies();
+    const contextCookies = await context.cookies();
 
     await context.close();
 
-    return res.json({ html, status, finalUrl, cookies });
+    return { html, status, finalUrl, cookies: contextCookies, debug: { statusCode: status } };
   } catch (err) {
     if (context) {
       try {
         await context.close();
       } catch (_) {}
     }
-    console.error("fetch-html error:", err);
-    return res.status(500).json({ error: err.message });
+    throw err;
   }
-});
+}
 
 app.listen(PORT, () => {
   console.log(`Browser service listening on port ${PORT}`);
